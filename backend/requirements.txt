@@ -1,0 +1,9 @@
+setuptools>=65.0.0
+Flask>=3.0.0,<4.0.0
+Flask-CORS>=4.0.0
+numpy>=1.26.0,<3.0.0
+Werkzeug>=3.0.0,<4.0.0
+insightface>=0.7.3
+onnxruntime>=1.16.0
+opencv-python>=4.8.0
+
