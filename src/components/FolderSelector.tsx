@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { FolderOpen, FolderInput, Database, Play, Sliders } from 'lucide-react';
 
 interface FolderSelectorProps {
-  onStart: (inputFolder: string, outputFolder: string, threshold: number, embeddingsDir: string) => void;
+  onStart: (inputFolder: string, outputFolder: string, threshold: number, embeddingsDir: string, checkAllOrientations: boolean) => void;
   disabled: boolean;
 }
 
@@ -11,6 +11,7 @@ export const FolderSelector = ({ onStart, disabled }: FolderSelectorProps) => {
   const [outputFolder, setOutputFolder] = useState<string>('');
   const [threshold, setThreshold] = useState<number>(0.5);
   const [embeddingsDir, setEmbeddingsDir] = useState<string>('');
+  const [checkAllOrientations, setCheckAllOrientations] = useState<boolean>(false);
 
   useEffect(() => {
     // Get embeddings directory on mount
@@ -44,7 +45,7 @@ export const FolderSelector = ({ onStart, disabled }: FolderSelectorProps) => {
 
   const handleStart = () => {
     if (inputFolder && outputFolder && embeddingsDir) {
-      onStart(inputFolder, outputFolder, threshold, embeddingsDir);
+      onStart(inputFolder, outputFolder, threshold, embeddingsDir, checkAllOrientations);
     }
   };
 
@@ -125,6 +126,27 @@ export const FolderSelector = ({ onStart, disabled }: FolderSelectorProps) => {
           <span>0.3 (More matches)</span>
           <span>0.9 (Stricter)</span>
         </div>
+      </div>
+
+      {/* Check All Orientations Option */}
+      <div className="space-y-3">
+        <label className="flex items-center gap-3 cursor-pointer group">
+          <input
+            type="checkbox"
+            checked={checkAllOrientations}
+            onChange={(e) => setCheckAllOrientations(e.target.checked)}
+            disabled={disabled}
+            className="w-5 h-5 rounded bg-zinc-950 border-2 border-white/5 text-blue-600 focus:ring-2 focus:ring-blue-500/50 focus:ring-offset-0 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-300"
+          />
+          <div className="flex-1">
+            <div className="text-sm font-medium text-zinc-300 group-hover:text-zinc-100 transition-colors">
+              Check all 4 orientations (0°, 90°, 180°, 270°)
+            </div>
+            <div className="text-xs text-zinc-500 mt-0.5">
+              Slower but finds faces in rotated photos more reliably
+            </div>
+          </div>
+        </label>
       </div>
 
       {/* Embeddings Info */}

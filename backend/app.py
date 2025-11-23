@@ -165,7 +165,7 @@ def get_image_files(folder_path):
     print(f"Found {len(image_files)} images across all subfolders")
     return image_files
 
-def process_photo(photo_path, threshold):
+def process_photo(photo_path, threshold, check_all_orientations=False):
     """Process a single photo and return matches using vectorized similarity"""
     global face_app, person_embeddings
     
@@ -175,9 +175,6 @@ def process_photo(photo_path, threshold):
         if img is None:
             return []
         
-        # Detect faces
-        faces = face_app.get(img)
-        
         # Early return if no embeddings loaded
         if len(person_embeddings) == 0:
             return []
@@ -186,26 +183,78 @@ def process_photo(photo_path, threshold):
         person_names = list(person_embeddings.keys())
         person_embs_matrix = np.array([person_embeddings[name] for name in person_names])
         
-        # Match against person embeddings (vectorized)
-        matches = []
-        for face in faces:
-            face_embedding = face.embedding
-            # Normalize face embedding
-            face_norm = face_embedding / np.linalg.norm(face_embedding)
-            
-            # Vectorized similarity computation - much faster than looping
-            similarities = np.dot(person_embs_matrix, face_norm)
-            
-            # Find all matches above threshold
-            match_indices = np.where(similarities >= threshold)[0]
-            
-            for idx in match_indices:
-                matches.append({
-                    'person': person_names[idx],
-                    'similarity': float(similarities[idx])
-                })
+        all_matches = []
         
-        return matches
+        if check_all_orientations:
+            # Check all 4 orientations: 0°, 90°, 180°, 270°
+            rotations = [0, 90, 180, 270]
+            for rotation in rotations:
+                # Rotate image
+                if rotation == 90:
+                    rotated_img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+                elif rotation == 180:
+                    rotated_img = cv2.rotate(img, cv2.ROTATE_180)
+                elif rotation == 270:
+                    rotated_img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                else:
+                    rotated_img = img
+                
+                # Detect faces in rotated image
+                faces = face_app.get(rotated_img)
+                
+                # Match against person embeddings (vectorized)
+                for face in faces:
+                    face_embedding = face.embedding
+                    # Normalize face embedding
+                    face_norm = face_embedding / np.linalg.norm(face_embedding)
+                    
+                    # Vectorized similarity computation
+                    similarities = np.dot(person_embs_matrix, face_norm)
+                    
+                    # Find all matches above threshold
+                    match_indices = np.where(similarities >= threshold)[0]
+                    
+                    for idx in match_indices:
+                        all_matches.append({
+                            'person': person_names[idx],
+                            'similarity': float(similarities[idx])
+                        })
+            
+            # Remove duplicate matches (keep highest similarity for each person)
+            if all_matches:
+                best_matches = {}
+                for match in all_matches:
+                    person = match['person']
+                    similarity = match['similarity']
+                    if person not in best_matches or similarity > best_matches[person]['similarity']:
+                        best_matches[person] = match
+                return list(best_matches.values())
+            return []
+        
+        else:
+            # Original behavior: check only corrected orientation
+            faces = face_app.get(img)
+            
+            # Match against person embeddings (vectorized)
+            matches = []
+            for face in faces:
+                face_embedding = face.embedding
+                # Normalize face embedding
+                face_norm = face_embedding / np.linalg.norm(face_embedding)
+                
+                # Vectorized similarity computation - much faster than looping
+                similarities = np.dot(person_embs_matrix, face_norm)
+                
+                # Find all matches above threshold
+                match_indices = np.where(similarities >= threshold)[0]
+                
+                for idx in match_indices:
+                    matches.append({
+                        'person': person_names[idx],
+                        'similarity': float(similarities[idx])
+                    })
+            
+            return matches
     
     except Exception as e:
         print(f"Error processing {photo_path}: {e}")
@@ -235,7 +284,7 @@ def copy_to_person_folder(photo_path, person_name, output_dir, similarity):
     
     return str(dest_path)
 
-def organize_photos_thread(input_folder, output_folder, threshold):
+def organize_photos_thread(input_folder, output_folder, threshold, check_all_orientations=False):
     """Background thread for organizing photos with parallel processing"""
     global organize_state, face_app
     
@@ -271,6 +320,8 @@ def organize_photos_thread(input_folder, output_folder, threshold):
         # Limit workers to CPU count or 8, whichever is smaller
         max_workers = min(multiprocessing.cpu_count(), 8)
         print(f"Using {max_workers} parallel workers for processing")
+        if check_all_orientations:
+            print("⚠️ Multi-orientation checking enabled (will check 4 rotations per photo)")
         
         # Lock for thread-safe state updates
         state_lock = threading.Lock()
@@ -278,7 +329,7 @@ def organize_photos_thread(input_folder, output_folder, threshold):
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all photo processing tasks
             future_to_photo = {
-                executor.submit(process_photo, photo_path, threshold): photo_path
+                executor.submit(process_photo, photo_path, threshold, check_all_orientations): photo_path
                 for photo_path in image_files
             }
             
@@ -408,12 +459,14 @@ def organize_start():
     output_folder = data.get('outputFolder')
     threshold = data.get('threshold', config.DEFAULT_SIMILARITY_THRESHOLD)
     embeddings_dir = data.get('embeddingsDir')
+    check_all_orientations = data.get('checkAllOrientations', False)
     
     print(f"\n=== Organization Request ===")
     print(f"Input folder: {input_folder}")
     print(f"Output folder: {output_folder}")
     print(f"Threshold: {threshold}")
     print(f"Embeddings dir: {embeddings_dir}")
+    print(f"Check all orientations: {check_all_orientations}")
     
     # Validate inputs
     if not input_folder or not os.path.exists(input_folder):
@@ -485,7 +538,7 @@ def organize_start():
     # Start background thread - ONLY after initialization is 100% complete
     thread = threading.Thread(
         target=organize_photos_thread,
-        args=(input_folder, output_folder, threshold),
+        args=(input_folder, output_folder, threshold, check_all_orientations),
         daemon=True
     )
     thread.start()

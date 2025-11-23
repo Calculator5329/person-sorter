@@ -11,13 +11,15 @@ function App() {
     inputFolder: string,
     outputFolder: string,
     threshold: number,
-    embeddingsDir: string
+    embeddingsDir: string,
+    checkAllOrientations: boolean
   ) => {
     await start({
       inputFolder,
       outputFolder,
       threshold,
       embeddingsDir,
+      checkAllOrientations,
     });
   };
 

@@ -33,6 +33,7 @@ export interface OrganizeRequest {
   outputFolder: string;
   threshold: number;
   embeddingsDir?: string;
+  checkAllOrientations?: boolean;
 }
 
 export interface OrganizeResponse {
