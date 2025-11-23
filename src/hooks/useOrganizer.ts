@@ -91,13 +91,35 @@ export const useOrganizer = (): UseOrganizerReturn => {
           return;
         }
 
-        // Check if complete
-        if (!data.active) {
+        // Check if still initializing - don't mark as complete yet
+        if (data.initializing) {
+          // Still initializing, keep polling
+          return;
+        }
+
+        // Check if complete (only if NOT initializing)
+        if (!data.active && !data.initializing) {
           clearInterval(interval);
+          
+          console.log('Organization complete, fetching final results...');
+          console.log('Current persons from progress:', data.persons.length);
           
           // Fetch final results
           const results = await organizePhotos.getResults();
-          setPersons(results.persons);
+          console.log('Final results persons:', results.persons.length);
+          
+          // Use final results if available, otherwise keep current data
+          if (results.persons && results.persons.length > 0) {
+            setPersons(results.persons);
+          } else if (data.persons && data.persons.length > 0) {
+            // Keep the persons from progress if final results are empty
+            console.log('Using persons from progress data');
+            setPersons(data.persons);
+          } else {
+            // Both are empty, set to empty array
+            setPersons(results.persons || []);
+          }
+          
           setStatus('complete');
         }
       } catch (err) {

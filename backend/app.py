@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import numpy as np
 import cv2
+from PIL import Image, ExifTags
 import insightface
 from insightface.app import FaceAnalysis
 from urllib.parse import unquote
@@ -21,9 +22,11 @@ CORS(app)
 
 # Global state
 face_app = None
+face_app_lock = threading.Lock()  # Lock for face_app initialization
 person_embeddings = {}
 organize_state = {
     'active': False,
+    'initializing': False,  # New state for initialization phase
     'progress': {
         'scanned': 0,
         'total': 0,
@@ -37,13 +40,38 @@ organize_state = {
 }
 
 def initialize_face_app():
-    """Initialize InsightFace application"""
+    """Initialize InsightFace application and ensure it's ready"""
     global face_app
-    if face_app is None:
-        print("Initializing InsightFace...")
-        face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-        face_app.prepare(ctx_id=0 if config.USE_GPU else -1, det_size=config.FACE_DET_SIZE)
-        print("InsightFace initialized successfully")
+    
+    # Use lock to prevent concurrent initialization
+    with face_app_lock:
+        if face_app is None:
+            print("\n" + "="*50)
+            print("INITIALIZING FACE DETECTION MODELS")
+            print("="*50)
+            print("⏳ Loading InsightFace models (this may take 10-30 seconds)...")
+            
+            try:
+                face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+                print("✓ Face detection model loaded")
+                
+                print("⏳ Preparing face recognition engine...")
+                face_app.prepare(ctx_id=0 if config.USE_GPU else -1, det_size=config.FACE_DET_SIZE)
+                print("✓ Face recognition engine ready")
+                
+                # Ensure models are fully loaded
+                time.sleep(0.5)
+                
+                print("="*50)
+                print("✓ INITIALIZATION COMPLETE - READY TO PROCESS")
+                print("="*50 + "\n")
+                
+            except Exception as e:
+                face_app = None
+                print(f"✗ Initialization failed: {e}")
+                raise
+        else:
+            print("✓ Face detection already initialized")
 
 def load_embeddings(embeddings_dir):
     """Load person embeddings from .npy files and pre-normalize them"""
@@ -75,19 +103,66 @@ def cosine_similarity(emb1, emb2):
     """Calculate cosine similarity between two embeddings"""
     return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
 
+def correct_image_orientation(image_path):
+    """
+    Correct image orientation based on EXIF data
+    Returns corrected image as numpy array (BGR format for OpenCV)
+    """
+    try:
+        # Open image with PIL to read EXIF
+        pil_image = Image.open(image_path)
+        
+        # Get EXIF orientation tag
+        exif = pil_image.getexif()
+        orientation = None
+        
+        if exif:
+            for tag, value in exif.items():
+                if tag in ExifTags.TAGS and ExifTags.TAGS[tag] == 'Orientation':
+                    orientation = value
+                    break
+        
+        # Apply orientation correction
+        if orientation:
+            if orientation == 3:
+                pil_image = pil_image.rotate(180, expand=True)
+            elif orientation == 6:
+                pil_image = pil_image.rotate(270, expand=True)
+            elif orientation == 8:
+                pil_image = pil_image.rotate(90, expand=True)
+        
+        # Convert PIL image to OpenCV format (RGB -> BGR)
+        img_array = np.array(pil_image)
+        if len(img_array.shape) == 2:  # Grayscale
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        elif img_array.shape[2] == 4:  # RGBA
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+        else:  # RGB
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        return img_bgr
+    
+    except Exception as e:
+        print(f"Error correcting orientation for {image_path}: {e}")
+        # Fall back to regular cv2 imread
+        return cv2.imread(image_path)
+
 def get_image_files(folder_path):
-    """Recursively get all image files from folder"""
+    """Recursively get all image files from folder and subfolders"""
     image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif'}
     image_files = []
     
     folder = Path(folder_path)
     if not folder.exists():
+        print(f"Folder does not exist: {folder_path}")
         return []
     
+    print(f"Scanning recursively for images in: {folder_path}")
     for file in folder.rglob('*'):
-        if file.suffix.lower() in image_extensions:
+        if file.is_file() and file.suffix.lower() in image_extensions:
             image_files.append(str(file))
     
+    print(f"Found {len(image_files)} images across all subfolders")
     return image_files
 
 def process_photo(photo_path, threshold):
@@ -95,8 +170,8 @@ def process_photo(photo_path, threshold):
     global face_app, person_embeddings
     
     try:
-        # Read image
-        img = cv2.imread(photo_path)
+        # Read image with orientation correction for rotated photos
+        img = correct_image_orientation(photo_path)
         if img is None:
             return []
         
@@ -162,9 +237,20 @@ def copy_to_person_folder(photo_path, person_name, output_dir, similarity):
 
 def organize_photos_thread(input_folder, output_folder, threshold):
     """Background thread for organizing photos with parallel processing"""
-    global organize_state
+    global organize_state, face_app
     
     try:
+        # Ensure face_app is initialized before processing (with lock for safety)
+        with face_app_lock:
+            if face_app is None:
+                error_msg = 'CRITICAL: Face detection not initialized. Cannot process images.'
+                print(f"ERROR: {error_msg}")
+                organize_state['active'] = False
+                organize_state['initializing'] = False
+                organize_state['error'] = error_msg
+                return
+            print("✓ Thread verified face_app is initialized")
+        
         # Get all image files
         print(f"Scanning folder: {input_folder}")
         image_files = get_image_files(input_folder)
@@ -254,12 +340,24 @@ def organize_photos_thread(input_folder, output_folder, threshold):
         organize_state['progress']['currentFile'] = ''
         organize_state['progress']['currentPerson'] = ''
         
-        print(f"Organization complete - Processed {organize_state['progress']['scanned']} images")
+        print(f"\n{'='*60}")
+        print(f"✓ ORGANIZATION COMPLETE")
+        print(f"{'='*60}")
+        print(f"  Total scanned: {organize_state['progress']['scanned']}")
+        print(f"  Total organized: {organize_state['progress']['organized']}")
+        print(f"  Person folders: {len(organize_state['persons'])}")
+        if organize_state['persons']:
+            for person_name, person_data in organize_state['persons'].items():
+                print(f"    - {person_name}: {person_data['photoCount']} photos")
+        print(f"{'='*60}\n")
         
     except Exception as e:
-        print(f"Error in organize thread: {e}")
+        print(f"❌ Error in organize thread: {e}")
         organize_state['active'] = False
         organize_state['error'] = str(e)
+        # Still log what we had before error
+        print(f"  Persons before error: {len(organize_state.get('persons', {}))}")
+        print(f"  Scanned before error: {organize_state['progress'].get('scanned', 0)}")
 
 @app.route('/api/health', methods=['GET'])
 def health():
@@ -339,21 +437,42 @@ def organize_start():
     
     print(f"Using {len(person_embeddings)} person embeddings: {list(person_embeddings.keys())}")
     
-    # Initialize face app if needed
+    # Set initializing state FIRST so UI shows loading
+    organize_state['initializing'] = True
+    organize_state['active'] = False
+    organize_state['progress']['currentFile'] = 'Initializing face detection models...'
+    
+    # Initialize face app if needed - MUST complete before starting thread
     if face_app is None:
+        print("⚠ Face detection not initialized. Starting initialization...")
         try:
             initialize_face_app()
         except Exception as e:
-            return jsonify({'error': f'Failed to initialize face detection: {str(e)}'}), 500
+            error_msg = f'Failed to initialize face detection: {str(e)}'
+            print(f"ERROR: {error_msg}")
+            organize_state['initializing'] = False
+            organize_state['error'] = error_msg
+            return jsonify({'error': error_msg}), 500
     
-    # Reset state
+    # Double-check face_app is actually ready
+    if face_app is None:
+        error_msg = 'Face detection failed to initialize properly'
+        print(f"ERROR: {error_msg}")
+        organize_state['initializing'] = False
+        organize_state['error'] = error_msg
+        return jsonify({'error': error_msg}), 500
+    
+    print("✓ Face detection verified and ready")
+    
+    # NOW reset state and mark as active
     organize_state = {
         'active': True,
+        'initializing': False,
         'progress': {
             'scanned': 0,
             'total': 0,
             'organized': 0,
-            'currentFile': '',
+            'currentFile': 'Starting to scan files...',
             'currentPerson': ''
         },
         'persons': {},
@@ -361,13 +480,17 @@ def organize_start():
         'cancel_requested': False
     }
     
-    # Start background thread
+    print("🚀 Starting background processing thread...")
+    
+    # Start background thread - ONLY after initialization is 100% complete
     thread = threading.Thread(
         target=organize_photos_thread,
         args=(input_folder, output_folder, threshold),
         daemon=True
     )
     thread.start()
+    
+    print("✓ Organization thread started successfully")
     
     return jsonify({
         'success': True,
@@ -377,18 +500,32 @@ def organize_start():
 @app.route('/api/organize/progress', methods=['GET'])
 def organize_progress():
     """Get current organization progress"""
+    persons_list = list(organize_state['persons'].values())
+    
+    # Debug logging when returning data
+    if not organize_state['active'] and not organize_state.get('initializing', False):
+        # Organization is complete
+        print(f"📡 Progress request (COMPLETE): {len(persons_list)} persons, {organize_state['progress']['scanned']} scanned")
+    
     return jsonify({
         'active': organize_state['active'],
+        'initializing': organize_state.get('initializing', False),
         'progress': organize_state['progress'],
-        'persons': list(organize_state['persons'].values()),
+        'persons': persons_list,
         'error': organize_state.get('error', None)
     })
 
 @app.route('/api/organize/results', methods=['GET'])
 def organize_results():
     """Get final organization results"""
+    persons_list = list(organize_state['persons'].values())
+    print(f"\n📊 Results requested:")
+    print(f"  Persons: {len(persons_list)}")
+    print(f"  Scanned: {organize_state['progress']['scanned']}")
+    print(f"  Organized: {organize_state['progress']['organized']}")
+    
     return jsonify({
-        'persons': list(organize_state['persons'].values()),
+        'persons': persons_list,
         'totalScanned': organize_state['progress']['scanned'],
         'totalOrganized': organize_state['progress']['organized']
     })

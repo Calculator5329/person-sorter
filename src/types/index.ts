@@ -22,8 +22,10 @@ export interface Progress {
 
 export interface OrganizeState {
   active: boolean;
+  initializing?: boolean;
   progress: Progress;
   persons: Person[];
+  error?: string;
 }
 
 export interface OrganizeRequest {
