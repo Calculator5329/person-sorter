@@ -4,6 +4,8 @@ import threading
 import time
 import shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import numpy as np
@@ -44,7 +46,7 @@ def initialize_face_app():
         print("InsightFace initialized successfully")
 
 def load_embeddings(embeddings_dir):
-    """Load person embeddings from .npy files"""
+    """Load person embeddings from .npy files and pre-normalize them"""
     global person_embeddings
     person_embeddings = {}
     
@@ -60,7 +62,9 @@ def load_embeddings(embeddings_dir):
         try:
             person_name = npy_file.stem
             embedding = np.load(str(npy_file))
-            person_embeddings[person_name] = embedding
+            # Pre-normalize embeddings for faster cosine similarity
+            normalized_emb = embedding / np.linalg.norm(embedding)
+            person_embeddings[person_name] = normalized_emb
             print(f"Loaded embedding for: {person_name}")
         except Exception as e:
             print(f"Error loading {npy_file}: {e}")
@@ -87,7 +91,7 @@ def get_image_files(folder_path):
     return image_files
 
 def process_photo(photo_path, threshold):
-    """Process a single photo and return matches"""
+    """Process a single photo and return matches using vectorized similarity"""
     global face_app, person_embeddings
     
     try:
@@ -99,19 +103,32 @@ def process_photo(photo_path, threshold):
         # Detect faces
         faces = face_app.get(img)
         
-        # Match against person embeddings
+        # Early return if no embeddings loaded
+        if len(person_embeddings) == 0:
+            return []
+        
+        # Prepare person data for vectorized comparison
+        person_names = list(person_embeddings.keys())
+        person_embs_matrix = np.array([person_embeddings[name] for name in person_names])
+        
+        # Match against person embeddings (vectorized)
         matches = []
         for face in faces:
             face_embedding = face.embedding
+            # Normalize face embedding
+            face_norm = face_embedding / np.linalg.norm(face_embedding)
             
-            for person_name, person_emb in person_embeddings.items():
-                similarity = cosine_similarity(face_embedding, person_emb)
-                
-                if similarity >= threshold:
-                    matches.append({
-                        'person': person_name,
-                        'similarity': float(similarity)
-                    })
+            # Vectorized similarity computation - much faster than looping
+            similarities = np.dot(person_embs_matrix, face_norm)
+            
+            # Find all matches above threshold
+            match_indices = np.where(similarities >= threshold)[0]
+            
+            for idx in match_indices:
+                matches.append({
+                    'person': person_names[idx],
+                    'similarity': float(similarities[idx])
+                })
         
         return matches
     
@@ -144,7 +161,7 @@ def copy_to_person_folder(photo_path, person_name, output_dir, similarity):
     return str(dest_path)
 
 def organize_photos_thread(input_folder, output_folder, threshold):
-    """Background thread for organizing photos"""
+    """Background thread for organizing photos with parallel processing"""
     global organize_state
     
     try:
@@ -164,55 +181,80 @@ def organize_photos_thread(input_folder, output_folder, threshold):
             organize_state['error'] = f'No images found in folder. Supported formats: JPG, PNG, BMP, TIFF, GIF'
             return
         
-        # Process each photo
-        for i, photo_path in enumerate(image_files):
-            # Check for cancellation
-            if organize_state['cancel_requested']:
-                print("Organization cancelled by user")
-                break
+        # Use ThreadPoolExecutor for parallel processing
+        # Limit workers to CPU count or 8, whichever is smaller
+        max_workers = min(multiprocessing.cpu_count(), 8)
+        print(f"Using {max_workers} parallel workers for processing")
+        
+        # Lock for thread-safe state updates
+        state_lock = threading.Lock()
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all photo processing tasks
+            future_to_photo = {
+                executor.submit(process_photo, photo_path, threshold): photo_path
+                for photo_path in image_files
+            }
             
-            # Update progress
-            organize_state['progress']['scanned'] = i + 1
-            organize_state['progress']['currentFile'] = Path(photo_path).name
-            
-            # Process photo
-            matches = process_photo(photo_path, threshold)
-            
-            # Copy to person folders
-            for match in matches:
-                person_name = match['person']
-                similarity = match['similarity']
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_photo):
+                # Check for cancellation
+                if organize_state['cancel_requested']:
+                    print("Organization cancelled by user")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
                 
-                organize_state['progress']['currentPerson'] = person_name
+                photo_path = future_to_photo[future]
                 
-                # Copy file
-                new_path = copy_to_person_folder(photo_path, person_name, output_folder, similarity)
+                # Update scanned count (thread-safe)
+                with state_lock:
+                    organize_state['progress']['scanned'] += 1
+                    organize_state['progress']['currentFile'] = Path(photo_path).name
                 
-                # Update results
-                if person_name not in organize_state['persons']:
-                    organize_state['persons'][person_name] = {
-                        'name': person_name,
-                        'photoCount': 0,
-                        'photos': []
-                    }
+                try:
+                    # Get processing results
+                    matches = future.result()
+                    
+                    # Copy to person folders and update state
+                    for match in matches:
+                        person_name = match['person']
+                        similarity = match['similarity']
+                        
+                        with state_lock:
+                            organize_state['progress']['currentPerson'] = person_name
+                        
+                        # Copy file (I/O operation, can be outside lock)
+                        new_path = copy_to_person_folder(photo_path, person_name, output_folder, similarity)
+                        
+                        # Update results (thread-safe)
+                        with state_lock:
+                            if person_name not in organize_state['persons']:
+                                organize_state['persons'][person_name] = {
+                                    'name': person_name,
+                                    'photoCount': 0,
+                                    'photos': []
+                                }
+                            
+                            organize_state['persons'][person_name]['photoCount'] += 1
+                            organize_state['persons'][person_name]['photos'].append({
+                                'originalPath': photo_path,
+                                'newPath': new_path,
+                                'filename': Path(photo_path).name,
+                                'similarity': similarity,
+                                'timestamp': time.time()
+                            })
+                            
+                            organize_state['progress']['organized'] += 1
                 
-                organize_state['persons'][person_name]['photoCount'] += 1
-                organize_state['persons'][person_name]['photos'].append({
-                    'originalPath': photo_path,
-                    'newPath': new_path,
-                    'filename': Path(photo_path).name,
-                    'similarity': similarity,
-                    'timestamp': time.time()
-                })
-                
-                organize_state['progress']['organized'] += 1
+                except Exception as e:
+                    print(f"Error processing {photo_path}: {e}")
         
         # Mark as complete
         organize_state['active'] = False
         organize_state['progress']['currentFile'] = ''
         organize_state['progress']['currentPerson'] = ''
         
-        print("Organization complete")
+        print(f"Organization complete - Processed {organize_state['progress']['scanned']} images")
         
     except Exception as e:
         print(f"Error in organize thread: {e}")

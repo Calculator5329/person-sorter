@@ -1,48 +1,49 @@
 # Photo Organizer Backend
 
-Flask backend for face recognition and photo organization using InsightFace.
+Flask REST API for face recognition and photo organization using InsightFace.
 
-## Prerequisites
-
-- Python 3.12 or higher
-- pip (Python package manager)
-
-## Setup Instructions
+## Setup
 
 ### 1. Create Virtual Environment
 
-**Windows:**
 ```bash
 python -m venv venv
+```
+
+### 2. Activate Virtual Environment
+
+**Windows:**
+```bash
 venv\Scripts\activate
 ```
 
 **macOS/Linux:**
 ```bash
-python -m venv venv
 source venv/bin/activate
 ```
 
-### 2. Install Dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This will install:
-- Flask (web framework)
-- InsightFace (face recognition)
-- OpenCV (image processing)
-- NumPy (numerical computing)
-- ONNX Runtime (model inference)
-
-### 3. Run the Server
+## Running the Server
 
 ```bash
 python app.py
 ```
 
-The server will start on `http://127.0.0.1:5000`
+Server starts at: `http://127.0.0.1:5000`
+
+## Dependencies
+
+- **Flask 3.0+** - Web framework
+- **Flask-CORS 4.0+** - Cross-origin resource sharing
+- **InsightFace 0.7.3+** - Face recognition (buffalo_l model)
+- **OpenCV 4.8+** - Image processing
+- **NumPy 1.26+** - Numerical computing
+- **ONNX Runtime 1.16+** - Model inference
 
 ## API Endpoints
 
@@ -52,12 +53,12 @@ GET /api/health
 ```
 Returns server status and embeddings count.
 
-### Get/Set Embeddings
+### List/Load Embeddings
 ```
 GET /api/embeddings
 POST /api/embeddings
+Body: { "embeddingsDir": "path/to/embeddings" }
 ```
-List available person embeddings or set embeddings directory.
 
 ### Start Organization
 ```
@@ -74,7 +75,7 @@ Body: {
 ```
 GET /api/organize/progress
 ```
-Returns real-time progress updates.
+Returns real-time progress updates during organization.
 
 ### Get Results
 ```
@@ -86,36 +87,75 @@ Returns final organization results.
 ```
 POST /api/organize/cancel
 ```
-Cancel ongoing photo organization.
+
+### Serve Images
+```
+GET /api/image?path=/path/to/image.jpg
+```
+Serves image files from filesystem.
 
 ## Configuration
 
-Edit `config.py` to adjust:
-- Face detection size
-- GPU usage
-- Similarity thresholds
-- Cache settings
-- Server host/port
+Edit `config.py`:
+
+```python
+# Face detection settings
+FACE_DET_SIZE = (640, 640)  # Detection resolution
+USE_GPU = False              # GPU acceleration
+
+# Thresholds
+DEFAULT_SIMILARITY_THRESHOLD = 0.5
+MIN_SIMILARITY_THRESHOLD = 0.3
+MAX_SIMILARITY_THRESHOLD = 0.9
+
+# Performance
+ENABLE_CACHE = True  # Cache face detections
+
+# Server
+DEBUG = True
+HOST = '127.0.0.1'
+PORT = 5000
+```
+
+## How It Works
+
+1. **Load Embeddings** - Server loads `.npy` files from embeddings directory
+2. **Scan Photos** - Recursively finds all images in input folder
+3. **Detect Faces** - Uses InsightFace buffalo_l model to detect faces
+4. **Match Persons** - Compares face embeddings using cosine similarity
+5. **Organize** - Copies matching photos to person-specific folders
+6. **Report Progress** - Updates progress state every 500ms for frontend polling
 
 ## Troubleshooting
 
-### InsightFace Model Download
-On first run, InsightFace will download the `buffalo_l` model (~300MB). This requires internet connection.
+### Model Download on First Run
 
-### GPU Support
-By default, CPU execution is used. For GPU acceleration, install:
-```bash
-pip install onnxruntime-gpu
-```
-And set `USE_GPU = True` in `config.py`.
+InsightFace downloads the buffalo_l model (~300MB) on first use. This is normal and only happens once.
+
+### GPU Acceleration
+
+To use GPU:
+1. Install: `pip install onnxruntime-gpu`
+2. Set `USE_GPU = True` in `config.py`
+3. Ensure CUDA is properly installed
 
 ### Memory Issues
-For large photo collections, reduce `FACE_DET_SIZE` in `config.py` to `(480, 480)` or lower.
+
+For large photo collections:
+- Reduce `FACE_DET_SIZE` to `(480, 480)` or lower
+- Process in smaller batches
+- Ensure adequate RAM (4GB+ recommended)
+
+### Permission Errors
+
+- Backend needs read access to input folder
+- Backend needs write access to output folder
+- Run with appropriate permissions
 
 ## Notes
 
-- Person embeddings (.npy files) must be 512-dimensional vectors
-- Supported image formats: JPG, JPEG, PNG, BMP, TIFF, GIF
+- First run downloads InsightFace model (requires internet)
+- Caching improves performance on repeated scans
 - Photos are copied (not moved) to preserve originals
-- Cache directory stores face detection results for faster reprocessing
-
+- Supports recursive folder scanning
+- Thread-safe background processing
